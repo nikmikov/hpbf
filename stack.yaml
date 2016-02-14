@@ -8,13 +8,17 @@ packages:
 - '.'
 - location:
     git: https://github.com/nikmikov/haskell-osm-pbf.git
-    commit: a54ab09f1730b8be7afb3a44ee4d538d99208da4
+    commit: 27d47588c9f702985a6306e43142600ae00fa5da
 - location:
     git: https://github.com/alphaHeavy/protobuf.git
-    commit: 7b904af64f4bbf175cdabe6b4902c4356bd7246c    
+    commit: 7b904af64f4bbf175cdabe6b4902c4356bd7246c
+- location:
+    git: https://github.com/nikmikov/binary-conduit.git
+    commit: ec50a80a7f19a5856feba61192c52000bd78e026
 
 # Packages to be pulled from upstream that are not in the resolver (e.g., acme-missiles-0.3)
-extra-deps: []
+extra-deps:
+- binary-0.8.2.1
 
 # Override default flag values for local packages and extra-deps
 flags: {}

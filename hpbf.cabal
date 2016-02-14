@@ -27,4 +27,7 @@ executable hpbf
                      , conduit-combinators
                      , resourcet
                      , transformers
+                     , text
+                     , unordered-containers
+                     , binary >= 0.8.1
   default-language:    Haskell2010
