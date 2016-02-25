@@ -32,8 +32,10 @@ struct hpbf_node_links {
 
 
 struct hpbf_link {
-    uint32_t node_id_forward;  // destination node id when traverse in forward direction
-    uint32_t node_id_backward; // destination node id when traverse in backward direction
+    uint32_t node_id_forward; // destination node id
+                              // when traverse in forward direction
+    uint32_t node_id_backward;// destination node id
+                              // when traverse in backward direction
     uint16_t length_m;
     uint16_t link_attribute_id;
 };

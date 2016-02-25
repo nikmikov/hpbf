@@ -19,17 +19,19 @@ cabal-version:       >=1.10
 executable hpbf
   hs-source-dirs:      app
   main-is:             Main.hs
+  other-modules:       Data.Vector.Storable.Conduit
+                       Data.Vector.Storable.MMap
   ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
   build-depends:       base
                      , bytestring
                      , haskell-osm-pbf
-                     , conduit
+                     , conduit >= 1.1.1
                      , conduit-extra
                      , conduit-combinators >= 1.0.0
                      , resourcet
                      , transformers
                      , text
-                     , unordered-containers
+                     , containers
                      , binary >= 0.8.1
                      , binary-conduit
                      , mmap

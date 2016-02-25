@@ -8,7 +8,7 @@ packages:
 - '.'
 - location:
     git: https://github.com/nikmikov/haskell-osm-pbf.git
-    commit: 27d47588c9f702985a6306e43142600ae00fa5da
+    commit: ae7c5e3cc13eae48fe5979865087c528ff4d46b9
 - location:
     git: https://github.com/alphaHeavy/protobuf.git
     commit: 7b904af64f4bbf175cdabe6b4902c4356bd7246c
