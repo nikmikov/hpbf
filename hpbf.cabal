@@ -23,6 +23,7 @@ executable hpbf
                        Data.Vector.Storable.MMap
                        Data.RoadGraph.Datatypes
                        Data.Vector.Storable.Search
+                       Data.RoadGraph.Internal.StorableData
   ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
   build-depends:       base
                      , bytestring

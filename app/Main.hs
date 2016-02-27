@@ -20,129 +20,67 @@ import qualified Data.Vector.Storable as V
 import qualified Data.Vector.Storable.Mutable as MV
 import qualified Data.Vector.Algorithms.Intro as VS
 import qualified Data.RoadGraph.Datatypes as RG
+import qualified Data.RoadGraph.Internal.StorableData as RGI
 import Data.Vector.Storable.MMap
 import Data.Vector.Storable.Conduit
 import qualified Data.Vector.Storable.Search as VSearch
 import Foreign.Storable
 import Data.Function(on)
 
-data HpbfNode = HpbfNode {
-      hpbfNodeId :: Int64
-    , hpbfLat :: Int32
-    , hpbfLon :: Int32
-    } deriving (Show)
-
-data HpbfJunction = HpbfJunction {
-      hpbfNode :: HpbfNode
-    , junctionIx :: Word32
-    } deriving (Show)
-
-data HpbfWay = HpbfWay {
-      hpbfWayId :: Int64
-    , hpbfWayNodeRef :: Int32 -- index of first node  in nodes_ref vector
-    } deriving (Show)
-
-toHpbfNode :: PBF.Node -> HpbfNode
-toHpbfNode = HpbfNode
+toOsmNode :: PBF.Node -> RGI.OsmNode
+toOsmNode = RGI.OsmNode
                <$> PBF.nodeId
                <*> (convertCoord . fst . PBF.nodeCoord)
                <*> (convertCoord . snd . PBF.nodeCoord)
 
+-- | coordinate conversion fron nanoseconds with precision loss
 convertCoord :: Int64 -> Int32
 convertCoord n = fromIntegral (n `div` 100)
 
-instance Storable HpbfWay where
-    sizeOf _ = 12
-    alignment _ = alignment (undefined :: Word32)
-    peek ptr = HpbfWay
-               <$> (`peekByteOff` 0) ptr
-               <*> (`peekByteOff` 8) ptr
-    poke ptr (HpbfWay id' nodeRef) =
-                          (`pokeByteOff` 0) ptr id'
-                          *> (`pokeByteOff` 8) ptr nodeRef
+-- | Write vectors of OsmNode to disk
+--   return vector length
+sinkOsmNodes :: MonadResource m => Sink PBFPrimitive m Int
+sinkOsmNodes = CC.concatMap PBF.getNode
+             =$= CC.map toOsmNode
+             =$= sinkFileLengthPrefixedVector RGI.workOsmNodesFile
 
-instance Storable HpbfNode where
-    sizeOf _ = 16
-    alignment _ = alignment (undefined :: Word32)
-    peek ptr = HpbfNode
-           <$> (`peekByteOff` 0) ptr
-           <*> (`peekByteOff` 8) ptr
-           <*> (`peekByteOff` 12) ptr
-    poke ptr (HpbfNode id' lat lon) =
-               (`pokeByteOff` 0) ptr id'
-               *> (`pokeByteOff` 8) ptr lat
-               *> (`pokeByteOff` 12) ptr lon
-
-
-instance Storable HpbfJunction where
-    sizeOf _ = 20
-    alignment _ = alignment (undefined :: Word32)
-    peek ptr = HpbfJunction
-           <$> (`peekByteOff` 0) ptr
-           <*> (`peekByteOff` 16) ptr
-    poke ptr (HpbfJunction node ix) =
-               (`pokeByteOff` 0) ptr node
-               *> (`pokeByteOff` 16) ptr ix
-
-
-sinkNodes :: MonadResource m =>  Sink PBFPrimitive m ()
-sinkNodes = CC.concatMap PBF.getNode
-          =$= CC.map toHpbfNode
-          =$= sinkFileLengthPrefixedVector_ workNodesFile
-
-
-sinkWays :: MonadResource m => Sink PBFPrimitive m ()
-sinkWays = CC.concatMap PBF.getWay
-         =$= getZipSink (ZipSink sinkWays' *> ZipSink sinkNodeRef)
-    where toHpbfWay w a = let a' = a + (fromIntegral . length . PBF.wayRefs) w
-                              w' = HpbfWay (PBF.wayId w) a'
-                          in (a', w')
-          sinkWays' = void ( CL.mapAccum toHpbfWay (0::Int32) )
-                    =$= sinkFileLengthPrefixedVector_ workLinksFile
+-- | Write ways (Vector OsmWay) and link node reference vector (Vector Int64) to disk
+--   return vector length of OsmWay vector
+sinkOsmWays :: MonadResource m => Sink PBFPrimitive m Int
+sinkOsmWays = CC.concatMap PBF.getWay
+            =$= getZipSink (ZipSink sinkWays' *> ZipSink sinkNodeRef)
+    where toOsmWay w a = let a' = a + (fromIntegral . length . PBF.wayRefs) w
+                             w' = RGI.OsmWay (PBF.wayId w) a'
+                         in (a', w')
+          sinkWays' = void ( CL.mapAccum toOsmWay (0::Int32) )
+                    =$= sinkFileLengthPrefixedVector RGI.workOsmWayFile
           sinkNodeRef = CC.concatMap PBF.wayRefs
-                        =$= sinkFileLengthPrefixedVector_ workLinkNodesRefFile
+                        =$= sinkFileLengthPrefixedVector RGI.workOsmWayNodesFile
 
-workNodesFile :: FilePath
-workNodesFile = "_work.nodes"
+-- | initial export of links and ways from PBF
+--   will create 3 vectors: OsmNode, OsmWay, WayNodeReference : Int64
+exportInitialVectors :: FilePath -> IO ()
+exportInitialVectors fileName =  void $ runResourceT $ CC.sourceFile fileName
+                                 $$ conduitPbfToPrimitives
+                                 =$= getZipSink (ZipSink sinkOsmNodes *> ZipSink sinkOsmWays)
 
-workJunctionsFile :: FilePath
-workJunctionsFile = "_work.junctions"
+mmapNodes :: IO( V.Vector RGI.OsmNode )
+mmapNodes = mmapLengthPrefixedVector RGI.workOsmNodesFile
 
-workLinksFile :: FilePath
-workLinksFile = "_work.links"
+mmapNodesMutable :: IO( MV.IOVector RGI.OsmNode )
+mmapNodesMutable = mmapLengthPrefixedMVector RGI.workOsmNodesFile
 
-workNodesRefCntFile :: FilePath
-workNodesRefCntFile = "_work.nodes_ref_cnt"
+mmapLinks :: IO( V.Vector RGI.OsmWay )
+mmapLinks = mmapLengthPrefixedVector RGI.workOsmWayFile
 
-workLinkNodesRefFile :: FilePath
-workLinkNodesRefFile = "_work.links_nodes_ref"
-
-
-
--- | initial export of links and nodes from PBF
-exportVectors :: FilePath -> IO()
-exportVectors fileName =  runResourceT $ CC.sourceFile fileName
-                          $$ conduitPbfToPrimitives
-                          =$= getZipSink (ZipSink sinkNodes *> ZipSink sinkWays)
-
-mmapNodes :: IO( V.Vector HpbfNode )
-mmapNodes = mmapLengthPrefixedVector workNodesFile
-
-mmapLinks :: IO( V.Vector HpbfWay )
-mmapLinks = mmapLengthPrefixedVector workNodesFile
-
-mmapNodesMutable :: IO( MV.IOVector HpbfNode )
-mmapNodesMutable = mmapLengthPrefixedMVector workNodesFile
-
-mmapLinkNodesRef :: IO( V.Vector Int64 )
-mmapLinkNodesRef = mmapLengthPrefixedVector workLinkNodesRefFile
-
-mmapNodesRefCounterMutable :: IO(MV.IOVector Word8)
-mmapNodesRefCounterMutable = mmapLengthPrefixedMVector workNodesRefCntFile
+mmapOsmWayNodes :: IO( V.Vector Int64 )
+mmapOsmWayNodes = mmapLengthPrefixedVector RGI.workOsmWayNodesFile
 
 mmapNodesRefCounter :: IO(V.Vector Word8)
-mmapNodesRefCounter = mmapLengthPrefixedVector workNodesRefCntFile
+mmapNodesRefCounter = mmapLengthPrefixedVector RGI.workOsmNodeRefCntFile
 
+mmapNodesRefCounterMutable :: IO(MV.IOVector Word8)
+mmapNodesRefCounterMutable = mmapLengthPrefixedMVector RGI.workOsmNodeRefCntFile
 
 -- | populate nodes reference counter vector. will go throw the links vector
 --   and increment counter by one in nodes_ref vector for every node which is a part of a link
@@ -154,23 +92,26 @@ mmapNodesRefCounter = mmapLengthPrefixedVector workNodesRefCntFile
 classifyNodes :: IO()
 classifyNodes = do
   nodesVec <- mmapNodes
-  nodesRefVec <- mmapLinkNodesRef
+  nodesRefVec <- mmapOsmWayNodes
   nodesRefCounterVec <- mmapNodesRefCounterMutable
-  putStrLn $ "Classifying nodes: " ++ show ( V.length nodesRefVec )
   V.mapM_ (incNodeCnt nodesVec nodesRefCounterVec ) nodesRefVec
    where incNodeCnt nodesVec nodesRefCounterVec i = do
-                  let (Just ix) = findNodeIndex i nodesVec
+                  ix <- case findNodeIndex i nodesVec of
+                             (Just x) -> return x
+                             _ -> fail $ "Unable to find node index: " ++ show i
                   let saturatedSucc a
                           | a == maxBound  = a
                           | otherwise      = succ a
                   MV.modify nodesRefCounterVec saturatedSucc ix
 
 
-
-linkNodesRange :: MonadResource m
-                  => V.Vector Int64 -> Conduit HpbfWay m (HpbfWay, V.Vector Int64 )
-linkNodesRange vec = void (CL.mapAccum fn vec)
-    where fn el v' = let nxtIdx = fromIntegral (hpbfWayNodeRef el)
+-- | given osmWay and nodes ref vector produce stream of (OsmWay, OsmWayNodeIds)
+osmWaysWithNodeIds :: MonadResource m
+                  => V.Vector RGI.OsmWay
+                  -> V.Vector Int64
+                  -> Source m (RGI.OsmWay, V.Vector Int64)
+osmWaysWithNodeIds linksVec vec = void (CC.yieldMany linksVec =$= CL.mapAccum fn vec)
+    where fn el v' = let nxtIdx = fromIntegral (RGI.osmWayNodeEnd el)
                          (vecView, vecRest) = V.splitAt nxtIdx v'
                      in ( vecRest, (el, vecView) )
 
@@ -182,15 +123,15 @@ sourceIxVector v = CC.yieldMany v =$= void (CL.mapAccum acc 0)
 
 
 conduitGraphElements :: MonadResource m
-                     => V.Vector HpbfNode
+                     => V.Vector RGI.OsmNode
                      -> Conduit (Word8, Int) m RG.Node
 conduitGraphElements vec = CC.filter ( \(c, _) -> c > 1)
                            =$= CC.map (toRgNode . V.unsafeIndex vec . snd)
-    where toPoint = RG.Point <$> hpbfLat <*> hpbfLon
+    where toPoint = RG.Point <$> RGI.osmNodeLat <*> RGI.osmNodeLon
           toRgNode = RG.Node <$> toPoint <*> const 0
 
 
-
+-- | Create a junction vector
 createJunctions :: IO Int
 createJunctions = do
   nodesRefCounter <- mmapNodesRefCounter
@@ -200,38 +141,32 @@ createJunctions = do
                $$ CC.filter ( \(c, _) -> c > 1)
                =$= CC.map (V.unsafeIndex nodes . snd)
                =$= void (CL.mapAccum acc 0)
-               =$= sinkFileLengthPrefixedVector workJunctionsFile
-      where acc a s = (succ s, (HpbfJunction a s) )
+               =$= sinkFileLengthPrefixedVector RGI.workJunctionsFile
+      where acc a s = (succ s, RGI.Junction a s)
 
 createLinks :: IO()
 createLinks = do
   linksVec <- mmapLinks
-  linkNodes <- mmapLinkNodesRef
-  nodesRefCounter <- mmapNodesRefCounter
+  linkNodes <- mmapOsmWayNodes
   l <- runResourceT $
-    CC.yieldMany linksVec
-    $$ linkNodesRange linkNodes
-    =$= CC.length
+    osmWaysWithNodeIds linksVec linkNodes
+    $$ CC.length
   print l
 
 
-addPrim :: Word8 -> M.Map Word8 Int -> M.Map Word8 Int
-addPrim k = M.insertWith (+) k 1
+findNodeIndex :: Int64 -> V.Vector RGI.OsmNode -> Maybe Int
+findNodeIndex id' v = VSearch.find (compare `on` RGI.osmNodeId) v (RGI.OsmNode id' 0 0)
 
-printStat :: IO()
-printStat = do
-  nodesRefCounter <- mmapNodesRefCounter
-  let m = V.foldr addPrim M.empty nodesRefCounter
-  print m
-
-findNodeIndex :: Int64 -> V.Vector HpbfNode -> Maybe Int
-findNodeIndex id' v = VSearch.find (compare `on` hpbfNodeId) v (HpbfNode id' 0 0)
+findJunctionIndex :: Int64 -> V.Vector RGI.Junction -> Maybe Int
+findJunctionIndex id' v = VSearch.find cmp v (el id')
+    where el id' = RGI.Junction (RGI.OsmNode id' 0 0) 0
+          cmp = compare `on` (RGI.osmNodeId . RGI.junctionOsmNode)
 
 sortNodesVec :: IO ()
 sortNodesVec = do
   vec <- mmapNodesMutable
   let numNodes = MV.length vec
-  VS.sortBy (compare `on` hpbfNodeId) vec
+  VS.sortBy (compare `on` RGI.osmNodeId) vec
 
 createNodesRefCounterVec :: IO()
 createNodesRefCounterVec = do
@@ -239,22 +174,22 @@ createNodesRefCounterVec = do
   let numNodes = V.length nodesVec
   runResourceT $
                CC.replicate numNodes (0::Word8)
-               $$ sinkFileLengthPrefixedVector_ workNodesRefCntFile
+               $$ sinkFileLengthPrefixedVector_ RGI.workOsmNodeRefCntFile
 
 main :: IO ()
 main = do
   args <- getArgs
   let fileName = args !! 0
   putStrLn $ "Reading from " ++ fileName
-  exportVectors fileName
+  exportInitialVectors fileName
   putStrLn "Sorting "
   sortNodesVec
   putStrLn "Creating nodes refcounter vector"
   createNodesRefCounterVec
+  putStrLn "Classifying nodes"
   classifyNodes
-  printStat
   numNodes <- createJunctions
-  print numNodes
+  putStrLn $ "Junctions created: " ++ show numNodes
   --v <- MV.read vec 0
   --print v
   --fin
