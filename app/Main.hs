@@ -15,6 +15,8 @@ import Control.Monad(void)
 import qualified Data.Map.Strict as M
 import Data.Int
 import Data.Binary
+import Data.Maybe
+import qualified Data.List as L
 
 import qualified Data.Vector.Storable as V
 import qualified Data.Vector.Storable.Mutable as MV
@@ -26,6 +28,7 @@ import Data.Vector.Storable.Conduit
 import qualified Data.Vector.Storable.Search as VSearch
 import Foreign.Storable
 import Data.Function(on)
+import Control.Exception.Base(assert)
 
 toOsmNode :: PBF.Node -> RGI.OsmNode
 toOsmNode = RGI.OsmNode
@@ -96,7 +99,7 @@ classifyNodes = do
   nodesRefCounterVec <- mmapNodesRefCounterMutable
   V.mapM_ (incNodeCnt nodesVec nodesRefCounterVec ) nodesRefVec
    where incNodeCnt nodesVec nodesRefCounterVec i = do
-                  ix <- case findNodeIndex i nodesVec of
+                  ix <- case findNodeIndex nodesVec i of
                              (Just x) -> return x
                              _ -> fail $ "Unable to find node index: " ++ show i
                   let saturatedSucc a
@@ -144,18 +147,41 @@ createJunctions = do
                =$= sinkFileLengthPrefixedVector RGI.workJunctionsFile
       where acc a s = (succ s, RGI.Junction a s)
 
+data LinkComponent = LCLink           RG.Link
+                   | LCLinkAttrbiutes RG.LinkAttributes
+                   | LCGeometryOffset RG.LinkPackedGeometryOffset
+                   | LCLinkGeometry   RG.LinkGeometry
+                   | LCDummy          String
+
+
+conduitLinkComponents :: MonadResource m
+                         => V.Vector RGI.OsmNode
+                         -> V.Vector Word8
+                         -> Conduit (RGI.OsmWay, V.Vector Int64) m LinkComponent
+conduitLinkComponents nodeVec nodeIxVec = awaitForever $ \(osmWay, wayNodes) ->
+  do let nodes' :: [ (RGI.OsmNode, Word8) ]
+         nodes' = V.foldr ( (:) . lookupPair . fromJust . findNodeIndex nodeVec) [] wayNodes
+         lookupPair i = (V.unsafeIndex nodeVec i, V.unsafeIndex nodeIxVec i)
+         splitLink ( (x,_):xs) = splitLink' xs [x]
+         splitLink' [] ys = ys:[]
+         splitLink' ( (n, i):xs ) ys = if i < 2
+                                      then splitLink' xs (n:ys)
+                                      else (n:ys):splitLink' xs [n]
+         links' = splitLink nodes'
+     yield $ LCDummy "sd"
+
 createLinks :: IO()
 createLinks = do
   linksVec <- mmapLinks
   linkNodes <- mmapOsmWayNodes
-  l <- runResourceT $
+  _ <- runResourceT $
     osmWaysWithNodeIds linksVec linkNodes
     $$ CC.length
-  print l
+  return ()
 
 
-findNodeIndex :: Int64 -> V.Vector RGI.OsmNode -> Maybe Int
-findNodeIndex id' v = VSearch.find (compare `on` RGI.osmNodeId) v (RGI.OsmNode id' 0 0)
+findNodeIndex :: V.Vector RGI.OsmNode -> Int64 -> Maybe Int
+findNodeIndex v id' = VSearch.find (compare `on` RGI.osmNodeId) v (RGI.OsmNode id' 0 0)
 
 findJunctionIndex :: Int64 -> V.Vector RGI.Junction -> Maybe Int
 findJunctionIndex id' v = VSearch.find cmp v (el id')
