@@ -11,6 +11,7 @@ import Data.Conduit
 import qualified Data.Conduit.Combinators as CC
 import qualified Data.Conduit.List as CL(mapAccum)
 import Control.Monad.Trans.Resource
+import Control.Monad(void)
 import qualified Data.Map.Strict as M
 import Data.Int
 import Data.Binary
@@ -18,6 +19,7 @@ import Data.Binary
 import qualified Data.Vector.Storable as V
 import qualified Data.Vector.Storable.Mutable as MV
 import qualified Data.Vector.Algorithms.Intro as VS
+import qualified Data.RoadGraph.Datatypes as RG
 import Data.Vector.Storable.MMap
 import Data.Vector.Storable.Conduit
 import qualified Data.Vector.Storable.Search as VSearch
@@ -28,6 +30,11 @@ data HpbfNode = HpbfNode {
       hpbfNodeId :: Int64
     , hpbfLat :: Int32
     , hpbfLon :: Int32
+    } deriving (Show)
+
+data HpbfJunction = HpbfJunction {
+      hpbfNode :: HpbfNode
+    , junctionIx :: Word32
     } deriving (Show)
 
 data HpbfWay = HpbfWay {
@@ -67,10 +74,21 @@ instance Storable HpbfNode where
                *> (`pokeByteOff` 12) ptr lon
 
 
+instance Storable HpbfJunction where
+    sizeOf _ = 20
+    alignment _ = alignment (undefined :: Word32)
+    peek ptr = HpbfJunction
+           <$> (`peekByteOff` 0) ptr
+           <*> (`peekByteOff` 16) ptr
+    poke ptr (HpbfJunction node ix) =
+               (`pokeByteOff` 0) ptr node
+               *> (`pokeByteOff` 16) ptr ix
+
+
 sinkNodes :: MonadResource m =>  Sink PBFPrimitive m ()
 sinkNodes = CC.concatMap PBF.getNode
           =$= CC.map toHpbfNode
-          =$= sinkFileLengthPrefixedVector workNodesFile
+          =$= sinkFileLengthPrefixedVector_ workNodesFile
 
 
 sinkWays :: MonadResource m => Sink PBFPrimitive m ()
@@ -79,13 +97,16 @@ sinkWays = CC.concatMap PBF.getWay
     where toHpbfWay w a = let a' = a + (fromIntegral . length . PBF.wayRefs) w
                               w' = HpbfWay (PBF.wayId w) a'
                           in (a', w')
-          sinkWays' = (CL.mapAccum toHpbfWay (0::Int32) >> return() )
-                    =$= sinkFileLengthPrefixedVector workLinksFile
+          sinkWays' = void ( CL.mapAccum toHpbfWay (0::Int32) )
+                    =$= sinkFileLengthPrefixedVector_ workLinksFile
           sinkNodeRef = CC.concatMap PBF.wayRefs
-                        =$= sinkFileLengthPrefixedVector workLinkNodesRefFile
+                        =$= sinkFileLengthPrefixedVector_ workLinkNodesRefFile
 
 workNodesFile :: FilePath
 workNodesFile = "_work.nodes"
+
+workJunctionsFile :: FilePath
+workJunctionsFile = "_work.junctions"
 
 workLinksFile :: FilePath
 workLinksFile = "_work.links"
@@ -148,10 +169,39 @@ classifyNodes = do
 
 linkNodesRange :: MonadResource m
                   => V.Vector Int64 -> Conduit HpbfWay m (HpbfWay, V.Vector Int64 )
-linkNodesRange vec = CL.mapAccum fn vec >> return()
+linkNodesRange vec = void (CL.mapAccum fn vec)
     where fn el v' = let nxtIdx = fromIntegral (hpbfWayNodeRef el)
                          (vecView, vecRest) = V.splitAt nxtIdx v'
                      in ( vecRest, (el, vecView) )
+
+
+
+sourceIxVector :: (Monad m, Storable a) => V.Vector a -> Source m (a, Int)
+sourceIxVector v = CC.yieldMany v =$= void (CL.mapAccum acc 0)
+    where acc a s = (succ s, (a, s) )
+
+
+conduitGraphElements :: MonadResource m
+                     => V.Vector HpbfNode
+                     -> Conduit (Word8, Int) m RG.Node
+conduitGraphElements vec = CC.filter ( \(c, _) -> c > 1)
+                           =$= CC.map (toRgNode . V.unsafeIndex vec . snd)
+    where toPoint = RG.Point <$> hpbfLat <*> hpbfLon
+          toRgNode = RG.Node <$> toPoint <*> const 0
+
+
+
+createJunctions :: IO Int
+createJunctions = do
+  nodesRefCounter <- mmapNodesRefCounter
+  nodes <- mmapNodes
+  runResourceT $
+               sourceIxVector nodesRefCounter
+               $$ CC.filter ( \(c, _) -> c > 1)
+               =$= CC.map (V.unsafeIndex nodes . snd)
+               =$= void (CL.mapAccum acc 0)
+               =$= sinkFileLengthPrefixedVector workJunctionsFile
+      where acc a s = (succ s, (HpbfJunction a s) )
 
 createLinks :: IO()
 createLinks = do
@@ -188,8 +238,8 @@ createNodesRefCounterVec = do
   nodesVec <- mmapNodes
   let numNodes = V.length nodesVec
   runResourceT $
-    CC.replicate numNodes (0::Word8)
-       $$ sinkFileLengthPrefixedVector workNodesRefCntFile
+               CC.replicate numNodes (0::Word8)
+               $$ sinkFileLengthPrefixedVector_ workNodesRefCntFile
 
 main :: IO ()
 main = do
@@ -203,7 +253,8 @@ main = do
   createNodesRefCounterVec
   classifyNodes
   printStat
-  createLinks
+  numNodes <- createJunctions
+  print numNodes
   --v <- MV.read vec 0
   --print v
   --fin

@@ -1,5 +1,6 @@
 module Data.Vector.Storable.Conduit(
    sinkFileLengthPrefixedVector
+   , sinkFileLengthPrefixedVector_
 ) where
 
 import System.IO
@@ -10,19 +11,27 @@ import qualified Blaze.ByteString.Builder as Blaze
 import qualified Data.Conduit.Combinators as CC
 import qualified Data.ByteString.Builder as BB
 import Control.Monad.Trans.Resource
+import Control.Monad(void)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Foreign.Storable
+
+sinkFileLengthPrefixedVector_ :: (MonadResource m, Storable a)
+                                  => FilePath
+                                  -> Sink a m ()
+sinkFileLengthPrefixedVector_ = void . sinkFileLengthPrefixedVector
 
 -- | serialize stream of storables to file
 --   and prefix file with 8 bytes LE number of elements
 sinkFileLengthPrefixedVector :: (MonadResource m, Storable a)
                                   => FilePath
-                                  -> Sink a m ()
+                                  -> Sink a m Int
 sinkFileLengthPrefixedVector fileName = do
   elemCounter <- liftIO $ newIORef 0
   bracketP openFileAndReservePrefix
            (closeAndWritePrefix elemCounter)
            (serialize elemCounter)
+  val <- liftIO $ readIORef elemCounter
+  return $ fromIntegral val
     where openFileAndReservePrefix = do
             h <- openBinaryFile fileName WriteMode
             putLength h 0

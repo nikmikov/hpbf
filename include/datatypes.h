@@ -21,9 +21,7 @@ struct hpbf_point {
 
 struct hpbf_node {
     struct hpbf_point coordinates;
-    uint32_t links_index_begin;   // index of first link in hpbf_node_links[].
-                                  // Array of hpbf_node size n, must contain 'stop'
-                                  // node at the end to make iteration easier
+    uint32_t links_index_end;     // index of first link of the NEXT node
 };
 
 struct hpbf_node_links {

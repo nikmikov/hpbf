@@ -21,11 +21,13 @@ executable hpbf
   main-is:             Main.hs
   other-modules:       Data.Vector.Storable.Conduit
                        Data.Vector.Storable.MMap
+                       Data.RoadGraph.Datatypes
+                       Data.Vector.Storable.Search
   ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
   build-depends:       base
                      , bytestring
                      , haskell-osm-pbf
-                     , conduit >= 1.1.1
+                     , conduit >= 1.2
                      , conduit-extra
                      , conduit-combinators >= 1.0.0
                      , resourcet
