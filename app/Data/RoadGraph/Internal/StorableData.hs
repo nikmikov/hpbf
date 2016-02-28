@@ -7,6 +7,10 @@ import Data.Int
 import Data.Word
 import Foreign.Storable
 
+import qualified Data.Vector.Storable as V
+import qualified Data.Vector.Storable.Search as VSearch
+import Data.Function(on)
+
 -- | Just a conversion from OSM node with lat/lon precision reduced
 data OsmNode = OsmNode {
       osmNodeId :: Int64
@@ -14,9 +18,11 @@ data OsmNode = OsmNode {
     , osmNodeLon :: Int32
     }
 
+
 -- | OSM way with nodes ID stored in separate adjacency array
 data OsmWay = OsmWay {
       osmWayId :: Int64
+    , osmWayAttributes :: Int64
     , osmWayNodeEnd :: Int32 -- index of the first node for the NEXT element
     }
 
@@ -46,7 +52,7 @@ workOsmNodeRefCntFile = "_work.osm_nodes_ref_cnt"
 
 instance Storable OsmNode where
     sizeOf _ = 16
-    alignment _ = alignment (undefined :: Word32)
+    alignment _ = alignment (undefined :: Word64)
     peek ptr = OsmNode
            <$> (`peekByteOff` 0) ptr
            <*> (`peekByteOff` 8) ptr
@@ -57,21 +63,32 @@ instance Storable OsmNode where
         *> (`pokeByteOff` 12) ptr lon
 
 instance Storable OsmWay where
-    sizeOf _ = 12
-    alignment _ = alignment (undefined :: Word32)
+    sizeOf _ = 20
+    alignment _ = alignment (undefined :: Word64)
     peek ptr = OsmWay
                <$> (`peekByteOff` 0) ptr
                <*> (`peekByteOff` 8) ptr
-    poke ptr (OsmWay id' nodeRef) =
+               <*> (`peekByteOff` 16) ptr
+    poke ptr (OsmWay id' attr nodeRef) =
         (`pokeByteOff` 0) ptr id'
-        *> (`pokeByteOff` 8) ptr nodeRef
+        *> (`pokeByteOff` 8) ptr attr
+        *> (`pokeByteOff` 16) ptr nodeRef
 
 instance Storable Junction where
     sizeOf _ = 20
-    alignment _ = alignment (undefined :: Word32)
+    alignment _ = alignment (undefined :: Word64)
     peek ptr = Junction
            <$> (`peekByteOff` 0) ptr
            <*> (`peekByteOff` 16) ptr
     poke ptr (Junction node ix) =
                (`pokeByteOff` 0) ptr node
                *> (`pokeByteOff` 16) ptr ix
+
+
+-- | utility functions
+findNodeIndex :: V.Vector OsmNode -> Int64 -> Maybe Int
+findNodeIndex v id' = VSearch.find (compare `on` osmNodeId) v (OsmNode id' 0 0)
+
+findJunctionIndex :: V.Vector Junction -> OsmNode  -> Maybe Int
+findJunctionIndex v n = VSearch.find cmp v (Junction n 0)
+    where cmp = compare `on` (osmNodeId . junctionOsmNode)

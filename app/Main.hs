@@ -12,23 +12,19 @@ import qualified Data.Conduit.Combinators as CC
 import qualified Data.Conduit.List as CL(mapAccum)
 import Control.Monad.Trans.Resource
 import Control.Monad(void)
-import qualified Data.Map.Strict as M
 import Data.Int
 import Data.Binary
-import Data.Maybe
-import qualified Data.List as L
 
 import qualified Data.Vector.Storable as V
 import qualified Data.Vector.Storable.Mutable as MV
 import qualified Data.Vector.Algorithms.Intro as VS
-import qualified Data.RoadGraph.Datatypes as RG
+import qualified Data.RoadGraph.Export as RG
 import qualified Data.RoadGraph.Internal.StorableData as RGI
 import Data.Vector.Storable.MMap
 import Data.Vector.Storable.Conduit
-import qualified Data.Vector.Storable.Search as VSearch
+
 import Foreign.Storable
 import Data.Function(on)
-import Control.Exception.Base(assert)
 
 toOsmNode :: PBF.Node -> RGI.OsmNode
 toOsmNode = RGI.OsmNode
@@ -53,7 +49,7 @@ sinkOsmWays :: MonadResource m => Sink PBFPrimitive m Int
 sinkOsmWays = CC.concatMap PBF.getWay
             =$= getZipSink (ZipSink sinkWays' *> ZipSink sinkNodeRef)
     where toOsmWay w a = let a' = a + (fromIntegral . length . PBF.wayRefs) w
-                             w' = RGI.OsmWay (PBF.wayId w) a'
+                             w' = RGI.OsmWay (PBF.wayId w) 0 a'
                          in (a', w')
           sinkWays' = void ( CL.mapAccum toOsmWay (0::Int32) )
                     =$= sinkFileLengthPrefixedVector RGI.workOsmWayFile
@@ -82,6 +78,9 @@ mmapOsmWayNodes = mmapLengthPrefixedVector RGI.workOsmWayNodesFile
 mmapNodesRefCounter :: IO(V.Vector Word8)
 mmapNodesRefCounter = mmapLengthPrefixedVector RGI.workOsmNodeRefCntFile
 
+mmapJunctions :: IO(V.Vector RGI.Junction)
+mmapJunctions = mmapLengthPrefixedVector RGI.workJunctionsFile
+
 mmapNodesRefCounterMutable :: IO(MV.IOVector Word8)
 mmapNodesRefCounterMutable = mmapLengthPrefixedMVector RGI.workOsmNodeRefCntFile
 
@@ -99,12 +98,10 @@ classifyNodes = do
   nodesRefCounterVec <- mmapNodesRefCounterMutable
   V.mapM_ (incNodeCnt nodesVec nodesRefCounterVec ) nodesRefVec
    where incNodeCnt nodesVec nodesRefCounterVec i = do
-                  ix <- case findNodeIndex nodesVec i of
+                  ix <- case RGI.findNodeIndex nodesVec i of
                              (Just x) -> return x
                              _ -> fail $ "Unable to find node index: " ++ show i
-                  let saturatedSucc a
-                          | a == maxBound  = a
-                          | otherwise      = succ a
+                  let saturatedSucc a = if a == maxBound then a else succ a
                   MV.modify nodesRefCounterVec saturatedSucc ix
 
 
@@ -125,14 +122,6 @@ sourceIxVector v = CC.yieldMany v =$= void (CL.mapAccum acc 0)
     where acc a s = (succ s, (a, s) )
 
 
-conduitGraphElements :: MonadResource m
-                     => V.Vector RGI.OsmNode
-                     -> Conduit (Word8, Int) m RG.Node
-conduitGraphElements vec = CC.filter ( \(c, _) -> c > 1)
-                           =$= CC.map (toRgNode . V.unsafeIndex vec . snd)
-    where toPoint = RG.Point <$> RGI.osmNodeLat <*> RGI.osmNodeLon
-          toRgNode = RG.Node <$> toPoint <*> const 0
-
 
 -- | Create a junction vector
 createJunctions :: IO Int
@@ -147,51 +136,27 @@ createJunctions = do
                =$= sinkFileLengthPrefixedVector RGI.workJunctionsFile
       where acc a s = (succ s, RGI.Junction a s)
 
-data LinkComponent = LCLink           RG.Link
-                   | LCLinkAttrbiutes RG.LinkAttributes
-                   | LCGeometryOffset RG.LinkPackedGeometryOffset
-                   | LCLinkGeometry   RG.LinkGeometry
-                   | LCDummy          String
-
-
-conduitLinkComponents :: MonadResource m
-                         => V.Vector RGI.OsmNode
-                         -> V.Vector Word8
-                         -> Conduit (RGI.OsmWay, V.Vector Int64) m LinkComponent
-conduitLinkComponents nodeVec nodeIxVec = awaitForever $ \(osmWay, wayNodes) ->
-  do let nodes' :: [ (RGI.OsmNode, Word8) ]
-         nodes' = V.foldr ( (:) . lookupPair . fromJust . findNodeIndex nodeVec) [] wayNodes
-         lookupPair i = (V.unsafeIndex nodeVec i, V.unsafeIndex nodeIxVec i)
-         splitLink ( (x,_):xs) = splitLink' xs [x]
-         splitLink' [] ys = ys:[]
-         splitLink' ( (n, i):xs ) ys = if i < 2
-                                      then splitLink' xs (n:ys)
-                                      else (n:ys):splitLink' xs [n]
-         links' = splitLink nodes'
-     yield $ LCDummy "sd"
-
-createLinks :: IO()
+createLinks :: IO Int
 createLinks = do
-  linksVec <- mmapLinks
+  links <- mmapLinks
+  nodes <- mmapNodes
   linkNodes <- mmapOsmWayNodes
-  _ <- runResourceT $
-    osmWaysWithNodeIds linksVec linkNodes
-    $$ CC.length
-  return ()
+  junctions <- mmapJunctions
+  nodeRefCounter <- mmapNodesRefCounter
+  runResourceT $
+    osmWaysWithNodeIds links linkNodes
+    $$ RG.sinkExportLinks nodes nodeRefCounter junctions
 
-
-findNodeIndex :: V.Vector RGI.OsmNode -> Int64 -> Maybe Int
-findNodeIndex v id' = VSearch.find (compare `on` RGI.osmNodeId) v (RGI.OsmNode id' 0 0)
-
-findJunctionIndex :: Int64 -> V.Vector RGI.Junction -> Maybe Int
-findJunctionIndex id' v = VSearch.find cmp v (el id')
-    where el id' = RGI.Junction (RGI.OsmNode id' 0 0) 0
-          cmp = compare `on` (RGI.osmNodeId . RGI.junctionOsmNode)
+createNodes :: IO Int
+createNodes = do
+  junctions <- mmapJunctions
+  runResourceT $
+               CC.yieldMany junctions
+               $$ RG.sinkExportNodes
 
 sortNodesVec :: IO ()
 sortNodesVec = do
   vec <- mmapNodesMutable
-  let numNodes = MV.length vec
   VS.sortBy (compare `on` RGI.osmNodeId) vec
 
 createNodesRefCounterVec :: IO()
@@ -214,8 +179,8 @@ main = do
   createNodesRefCounterVec
   putStrLn "Classifying nodes"
   classifyNodes
-  numNodes <- createJunctions
-  putStrLn $ "Junctions created: " ++ show numNodes
-  --v <- MV.read vec 0
-  --print v
-  --fin
+  _ <- createJunctions
+  numJunctions <- createNodes
+  putStrLn $ "Junctions created: " ++ show numJunctions
+  numLinks <- createLinks
+  putStrLn $ "Links created: " ++ show numLinks

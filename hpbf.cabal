@@ -24,8 +24,9 @@ executable hpbf
                        Data.RoadGraph.Datatypes
                        Data.Vector.Storable.Search
                        Data.RoadGraph.Internal.StorableData
-  ghc-options:         -Wall
-                       --threaded -rtsopts -with-rtsopts=-N
+                       Data.RoadGraph.Export
+  ghc-options:         -Wall -Werror
+                       -- -threaded -rtsopts -with-rtsopts=-N
   build-depends:       base
                      , bytestring
                      , haskell-osm-pbf
